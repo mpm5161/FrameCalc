@@ -1059,11 +1059,12 @@
             <p className="text-xs text-gray-500 mb-4 -mt-1">Use these during the customer conversation to surface the assumptions that drive the model.</p>
             <div className="space-y-3">
               {[
-                { q: 'Walk me through how your team currently manages review and approval — from when creative is complete to when it\'s signed off. Where does it break down?', why: 'Surfaces minutes saved and friction points.' },
-                { q: 'How many people typically need to weigh in on a piece of content before it ships? Who\'s in the room vs. who\'s just getting a link?', why: 'Informs participating users count.' },
-                { q: 'What does it cost you when a project misses a deadline because of a revision cycle that ran long — in real dollars or in client relationships?', why: 'Opens hard-dollar savings and urgency.' },
-                { q: 'How does your team currently handle large media files with external agencies, clients, or production partners? What\'s the most painful part?', why: 'Opens mounted storage and secure sharing conversation.' },
-                { q: 'If every person on your production team got 30 minutes back each week, what would they actually do with it?', why: 'Anchors the capacity value story and ties ROI to business outcomes.' },
+                { q: 'How many people outside your core creative team have to approve something before it ships?', why: 'Sizes participating users beyond just seat holders.' },
+                { q: 'What is the single biggest time sink in your review process right now?', why: 'Surfaces the friction that drives minutes saved.' },
+                { q: 'Are you paying for separate tools just to move or share large media files with clients or vendors?', why: 'Opens hard-dollar savings: storage, transfer fees, redundant tools.' },
+                { q: 'How often do revision cycles cause you to miss a deadline, and what does that typically cost?', why: 'Quantifies urgency and the opportunity cost of delay.' },
+                { q: 'Is your content output growing faster than your team headcount right now?', why: 'Opens the capacity gap and headcount avoidance conversation.' },
+                { q: 'Where do you store different types of media across projects, and how do teams actually access it?', why: 'Surfaces active storage volume, duplication, and current storage spend.' },
               ].map((item, i) => (
                 <div key={i} className="flex gap-3 bg-gray-50 rounded-xl px-4 py-3">
                   <span className="text-[#FA0F00] font-black text-sm shrink-0 mt-0.5">{i + 1}</span>
