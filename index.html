@@ -533,6 +533,54 @@
     }
 
     // ═══════════════════════════════════════════════════════════════════
+    //  HOW TO USE
+    // ═══════════════════════════════════════════════════════════════════
+    function HowToUse() {
+      const [open, setOpen] = React.useState(true);
+      const steps = [
+        { n: '1', title: 'Customer & Program', desc: 'Enter the account name, select a buying program (ETLA, VIP Custom, or Frame Paper), choose a plan, set seat count, and configure price level. Custom negotiated pricing can be entered inline.' },
+        { n: '2', title: 'Storage', desc: 'Enter current active media volume if known. Add managed or mounted storage blocks as needed. The tool calculates what is included and flags any gap.' },
+        { n: '3', title: 'Workflow & ROI', desc: 'Pick an industry preset to pre-fill labor assumptions instantly, or enter your own. Use the discovery questions to guide the customer conversation and validate inputs.' },
+        { n: '4', title: 'Proposal', desc: 'Review the complete business case. Adjust scenario (Conservative, Expected, High-Impact) in the sidebar. Print to PDF or screenshot the summary for the customer.' },
+      ];
+      return (
+        <div className="rounded-xl overflow-hidden border border-gray-200 bg-white">
+          <button type="button" onClick={() => setOpen(o => !o)}
+            className="w-full flex items-center justify-between px-5 py-3 bg-[#1c1c1c] text-left">
+            <div className="flex items-center gap-2">
+              <svg width="14" height="14" viewBox="0 0 20 20" fill="white" opacity="0.7"><circle cx="10" cy="10" r="9" stroke="white" strokeWidth="1.5" fill="none"/><text x="10" y="14.5" textAnchor="middle" fontSize="11" fill="white" fontWeight="bold">i</text></svg>
+              <span className="text-white font-semibold text-sm">How to use this calculator</span>
+            </div>
+            <span className="text-gray-400 text-xs">{open ? 'Collapse' : 'Expand'}</span>
+          </button>
+          {open && (
+            <div className="px-5 py-4 space-y-4">
+              <p className="text-xs text-gray-500 leading-relaxed">
+                This tool builds a Frame.io business case for a specific account. Work through four steps in order. The sidebar updates live as you enter data. All fields with a <span className="text-red-500 font-bold">*</span> are required to generate the proposal; everything else is optional context.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                {steps.map(step => (
+                  <div key={step.n} className="bg-gray-50 rounded-xl p-3">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="bg-[#FA0F00] text-white text-[11px] font-black w-5 h-5 rounded flex items-center justify-center shrink-0">{step.n}</span>
+                      <span className="font-bold text-gray-900 text-xs">{step.title}</span>
+                    </div>
+                    <p className="text-xs text-gray-500 leading-relaxed">{step.desc}</p>
+                  </div>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500 border-t border-gray-100 pt-3">
+                <span><span className="font-semibold text-gray-700">Tip:</span> Industry presets in Step 3 fill all labor assumptions in one click.</span>
+                <span><span className="font-semibold text-gray-700">Tip:</span> Negotiated pricing overrides appear inline below each pricing field.</span>
+                <span><span className="font-semibold text-gray-700">Tip:</span> Hard-dollar savings are optional but strengthen the break-even story.</span>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
     //  STEP 1, CUSTOMER & BUYING PROGRAM
     // ═══════════════════════════════════════════════════════════════════
     function Step1({ s, u, calc }) {
@@ -578,6 +626,7 @@
 
       return (
         <div className="space-y-5">
+          <HowToUse />
           <Card>
             <SectionTitle>Customer Information</SectionTitle>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
