@@ -248,10 +248,11 @@
       // Note: we surface additional storage cost separately
 
       // ── Step 3: ROI ──────────────────────────────────────────────────
-      // participants: use entered value, else assume 2× seat count as a starting point
+      // participants: use entered value, else derive from seat count × preset ratio (default 2×)
+      const participantsRatio = parseFloat(s.participantsRatio) || 2;
       const participants = parseInt(s.participants) > 0
         ? parseInt(s.participants)
-        : (seats > 0 ? seats * 2 : 0);
+        : (seats > 0 ? Math.round(seats * participantsRatio) : 0);
       const hourlyRate = parseFloat(s.hourlyLaborCost) || 0;
       const minutesSaved = parseFloat(s.minutesSavedPerWeek) || 0;
       const hardDollarSavings = parseFloat(s.currentSpendToReduce) || 0;
@@ -941,6 +942,25 @@
     //  STEP 3, WORKFLOW / ROI DISCOVERY
     // ═══════════════════════════════════════════════════════════════════
     function Step3({ s, u, calc }) {
+      const PRESETS = {
+        media:  { label: 'Media & Entertainment', desc: 'Studios, broadcasters, OTT', hourlyLaborCost: '85',  minutesSavedPerWeek: '45', participantsRatio: '2.5' },
+        brand:  { label: 'Brand / In-House',       desc: 'Corporate creative, marketing',  hourlyLaborCost: '75',  minutesSavedPerWeek: '35', participantsRatio: '2'   },
+        agency: { label: 'Agency / Production',    desc: 'Creative agencies, prod. co.',   hourlyLaborCost: '95',  minutesSavedPerWeek: '40', participantsRatio: '1.5' },
+        post:   { label: 'Post / VFX',             desc: 'Post houses, VFX, finishing',    hourlyLaborCost: '110', minutesSavedPerWeek: '50', participantsRatio: '1.5' },
+      };
+
+      function applyPreset(key) {
+        const p = PRESETS[key];
+        u('hourlyLaborCost', p.hourlyLaborCost);
+        u('minutesSavedPerWeek', p.minutesSavedPerWeek);
+        u('participantsRatio', p.participantsRatio);
+        u('participants', '');
+        u('activePreset', key);
+      }
+
+      const ratio = parseFloat(s.participantsRatio) || 2;
+      const derivedParticipants = calc.seats > 0 ? Math.round(calc.seats * ratio) : 0;
+
       const frictionExamples = [
         'uploading or downloading large media files',
         'moving files between tools or people',
@@ -956,6 +976,38 @@
         <div className="space-y-5">
           <Card>
             <SectionTitle>Team &amp; Labor</SectionTitle>
+
+            {/* Industry preset picker */}
+            <div className="mb-5 pb-4 border-b border-gray-100">
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                Quick-fill by industry
+                <span className="ml-2 font-normal normal-case text-gray-400">— pre-loads typical rate, minutes saved, and team ratio</span>
+              </p>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {Object.entries(PRESETS).map(([key, preset]) => {
+                  const active = s.activePreset === key;
+                  return (
+                    <button key={key} type="button" onClick={() => applyPreset(key)}
+                      className={`text-left rounded-xl border-2 px-3 py-2.5 transition-all
+                        ${active ? 'border-[#FA0F00] bg-red-50' : 'border-gray-200 bg-white hover:border-gray-300 hover:shadow-sm'}`}>
+                      <p className={`font-bold text-xs leading-tight ${active ? 'text-[#FA0F00]' : 'text-gray-900'}`}>{preset.label}</p>
+                      <p className="text-[10px] text-gray-500 mt-0.5 leading-tight">{preset.desc}</p>
+                      <p className={`text-[10px] mt-1 font-medium leading-tight ${active ? 'text-[#FA0F00]' : 'text-gray-400'}`}>
+                        ${preset.hourlyLaborCost}/hr · {preset.minutesSavedPerWeek} min/wk · {preset.participantsRatio}× seats
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+              {s.activePreset && (
+                <button type="button"
+                  onClick={() => { u('activePreset', ''); u('participantsRatio', '2'); }}
+                  className="mt-2 text-xs text-gray-400 hover:text-gray-600 underline">
+                  Clear preset
+                </button>
+              )}
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
                 <Label htmlFor="ppl"
@@ -964,12 +1016,12 @@
                 </Label>
                 <Input id="ppl" type="number" value={s.participants}
                   onChange={v => u('participants', v)}
-                  placeholder={calc.seats > 0 ? String(calc.seats * 2) : 'e.g. 25'} min="1" />
+                  placeholder={derivedParticipants > 0 ? String(derivedParticipants) : 'e.g. 25'} min="1" />
                 <FieldHelp>
                   {s.participants
-                    ? 'Include everyone who touches review, approval, or media management.'
-                    : calc.seats > 0
-                      ? `Defaulting to 2× seat count (${calc.seats * 2}). Adjust if broader team participates.`
+                    ? 'Override active. Clear to revert to preset/default.'
+                    : derivedParticipants > 0
+                      ? `Defaulting to ${ratio}× seat count (${derivedParticipants}). Adjust as needed.`
                       : 'Include everyone who touches review, approval, or media management.'}
                 </FieldHelp>
               </div>
@@ -999,6 +1051,28 @@
                   ))}
                 </div>
               </div>
+            </div>
+          </Card>
+
+          <Card>
+            <SectionTitle>Discovery Questions</SectionTitle>
+            <p className="text-xs text-gray-500 mb-4 -mt-1">Use these during the customer conversation to surface the assumptions that drive the model.</p>
+            <div className="space-y-3">
+              {[
+                { q: 'Walk me through how your team currently manages review and approval — from when creative is complete to when it\'s signed off. Where does it break down?', why: 'Surfaces minutes saved and friction points.' },
+                { q: 'How many people typically need to weigh in on a piece of content before it ships? Who\'s in the room vs. who\'s just getting a link?', why: 'Informs participating users count.' },
+                { q: 'What does it cost you when a project misses a deadline because of a revision cycle that ran long — in real dollars or in client relationships?', why: 'Opens hard-dollar savings and urgency.' },
+                { q: 'How does your team currently handle large media files with external agencies, clients, or production partners? What\'s the most painful part?', why: 'Opens mounted storage and secure sharing conversation.' },
+                { q: 'If every person on your production team got 30 minutes back each week, what would they actually do with it?', why: 'Anchors the capacity value story and ties ROI to business outcomes.' },
+              ].map((item, i) => (
+                <div key={i} className="flex gap-3 bg-gray-50 rounded-xl px-4 py-3">
+                  <span className="text-[#FA0F00] font-black text-sm shrink-0 mt-0.5">{i + 1}</span>
+                  <div>
+                    <p className="text-sm text-gray-800 font-medium leading-snug">{item.q}</p>
+                    <p className="text-xs text-gray-400 mt-1 italic">{item.why}</p>
+                  </div>
+                </div>
+              ))}
             </div>
           </Card>
 
@@ -1798,8 +1872,10 @@
         annualGrowthPct: '',
         currentStorageSpend: '',
         duplicationFactor: '',
-        // Step 3 (participants derives from seats × 2 when blank)
+        // Step 3 (participants derives from seats × participantsRatio when blank)
         participants: '',
+        participantsRatio: '2',
+        activePreset: '',
         hourlyLaborCost: '75',
         minutesSavedPerWeek: '30',
         currentSpendToReduce: '',
