@@ -1,0 +1,1879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Frame.io ROI &amp; Proposal Builder</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            adobe: {
+              blue: '#1473e6',
+              dark: '#0d66d0',
+              navy: '#1b1f2e',
+            },
+            frame: {
+              teal: '#00b4d8',
+            },
+          },
+          fontFamily: {
+            sans: ['-apple-system', 'BlinkMacSystemFont', '"Adobe Clean"', '"Segoe UI"', 'Roboto', 'sans-serif'],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    /* ── Custom base styles ── */
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
+    /* Input ring on focus */
+    .field-input:focus { outline: 2px solid #FA0F00; outline-offset: 0px; }
+    .field-input { transition: border-color 0.15s ease; }
+
+    /* Tooltip */
+    .tooltip-wrap { position: relative; display: inline-flex; align-items: center; }
+    .tooltip-wrap .tooltip-box {
+      display: none; position: absolute; left: 50%; transform: translateX(-50%);
+      bottom: calc(100% + 6px); background: #1b1f2e; color: #fff;
+      font-size: 12px; line-height: 1.4; padding: 6px 10px; border-radius: 6px;
+      white-space: nowrap; max-width: 240px; white-space: normal; width: max-content;
+      max-width: 220px; z-index: 50; pointer-events: none;
+    }
+    .tooltip-wrap:hover .tooltip-box { display: block; }
+    .tooltip-wrap .tooltip-box::after {
+      content: ''; position: absolute; top: 100%; left: 50%;
+      transform: translateX(-50%); border: 5px solid transparent;
+      border-top-color: #1b1f2e;
+    }
+
+    /* Step indicator */
+    .step-dot { transition: all 0.2s ease; }
+
+    /* Break-even hero */
+    .breakeven-num { font-size: clamp(2.5rem, 5vw, 4rem); font-weight: 800; line-height: 1; }
+
+    /* Scenario tab */
+    .scenario-tab { transition: all 0.15s ease; }
+
+    /* Collapsible */
+    .collapsible-content { overflow: hidden; transition: max-height 0.3s ease; }
+
+    /* Card hover */
+    .metric-card { transition: box-shadow 0.15s ease; }
+
+    /* ── Print styles ── */
+    @media print {
+      .no-print { display: none !important; }
+      .print-only { display: block !important; }
+      body { background: white !important; font-size: 12px; }
+      .print-page { padding: 0 !important; max-width: 100% !important; }
+      .print-break { page-break-before: always; }
+      .metric-card { box-shadow: none !important; border: 1px solid #e0e0e0 !important; }
+    }
+    .print-only { display: none; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f1f1; }
+    ::-webkit-scrollbar-thumb { background: #c0c0c0; border-radius: 3px; }
+  </style>
+</head>
+<body class="bg-[#f5f5f5] min-h-screen">
+  <div id="root"></div>
+
+  <!-- Load pricing configuration first (separate file for easy updating) -->
+  <script src="pricing-config.js"></script>
+
+  <!-- React 18 + Babel for JSX (inline = no CORS issue with file://) -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    /* global PRICING_CONFIG, React, ReactDOM */
+    const { useState, useMemo, useCallback, useRef, useEffect } = React;
+    const PC = PRICING_CONFIG;
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  UTILITIES
+    // ═══════════════════════════════════════════════════════════════════
+    const fmt = {
+      currency: (n, compact = false) => {
+        if (n == null || isNaN(n)) return '-';
+        if (compact && Math.abs(n) >= 1000) {
+          return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD',
+            notation: 'compact', maximumFractionDigits: 1 }).format(n);
+        }
+        return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD',
+          minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(n);
+      },
+      num: (n, dec = 0) => {
+        if (n == null || isNaN(n)) return '-';
+        return new Intl.NumberFormat('en-US', { minimumFractionDigits: dec,
+          maximumFractionDigits: dec }).format(n);
+      },
+      pct: (n, dec = 0) => n == null || isNaN(n) ? '-' : `${fmt.num(n, dec)}%`,
+      months: (n) => {
+        if (n == null || isNaN(n)) return '-';
+        if (n < 1) return `${Math.round(n * 30)} days`;
+        return `${fmt.num(n, 1)} months`;
+      },
+      tb: (n) => n == null || isNaN(n) ? '-' : `${fmt.num(n, n < 10 ? 1 : 0)} TB`,
+    };
+
+    function clamp(v, min, max) { return Math.max(min, max == null ? v : Math.min(v, max)); }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  CALCULATION ENGINE
+    // ═══════════════════════════════════════════════════════════════════
+    function getPricePerSeat(planId, seatsCount, priceLevel, programId) {
+      const plan = PC.plans[planId];
+      if (!plan) return null;
+      const pt = plan.pricing;
+      if (pt.type === 'flat_per_seat') {
+        return pt.perSeat[priceLevel] ?? pt.perSeat.target;
+      }
+      if (pt.type === 'volume_tiered') {
+        if (programId === 'vipc' && pt.vipc) {
+          return pt.vipc[priceLevel] ?? pt.vipc.target;
+        }
+        const tier = (pt.tiers || []).find(t =>
+          seatsCount >= t.min && (t.max == null || seatsCount <= t.max));
+        if (!tier) return null;
+        return tier[priceLevel] ?? tier.target;
+      }
+      return null;
+    }
+
+    function getIncludedManagedTB(planId, seatsCount) {
+      const plan = PC.plans[planId];
+      if (!plan) return 0;
+      const m = plan.storage.managed;
+      if (m.type === 'seat_scaled' || m.type === 'sitewide') {
+        return Math.min(m.tbPerUser * seatsCount, m.maxTB);
+      }
+      if (m.type === 'account_level') return m.tbTotal || 0;
+      if (m.type === 'legacy_per_user_gb') return (m.gbPerUser / 1024) * seatsCount;
+      return 0;
+    }
+
+    function calculate(s) {
+      const errors = [];
+      const warnings = [];
+      const plan = PC.plans[s.plan] || null;
+      const program = PC.buyingPrograms[s.buyingProgram] || null;
+
+      // ── Step 1: Pricing ──────────────────────────────────────────────
+      let seats = 0;
+      let pricePerSeat = null;
+      let baseSoftwareCost = 0;
+      let totalSoftwareCost = 0;
+      let addManagedCost = 0;
+      let addMountedCost = 0;
+
+      seats = parseInt(s.seats) || 0;
+      if (plan && seats > 0) {
+        const tablePricePerSeat = getPricePerSeat(s.plan, seats, s.priceLevel, s.buyingProgram);
+        pricePerSeat = parseFloat(s.customPricePerSeat) > 0
+          ? parseFloat(s.customPricePerSeat)
+          : tablePricePerSeat;
+        if (pricePerSeat != null) {
+          baseSoftwareCost = pricePerSeat * seats;
+        }
+        if (seats < (plan.minSeats || 0)) {
+          errors.push(`Minimum seat quantity for this plan is ${plan.minSeats}.`);
+        }
+      }
+
+      // Table-calculated per-seat price (before any override), used for reference display
+      const tablePricePerSeatRef = plan && seats > 0
+        ? getPricePerSeat(s.plan, seats, s.priceLevel, s.buyingProgram)
+        : null;
+
+      // Add-ons
+      const addManagedTB = parseFloat(s.additionalManagedTB) || 0;
+      const addMountedBlocks = parseInt(s.additionalMountedBlocks) || 0;
+      const managedAddon = PC.addons.managedStorage;
+      const mountedAddon = PC.addons.mountedStorage;
+      const priceKey = s.priceLevel || 'target';
+      const tableManagedPrice = managedAddon.pricing[priceKey] ?? managedAddon.pricing.target;
+      const effectiveManagedPrice = parseFloat(s.customManagedPrice) > 0
+        ? parseFloat(s.customManagedPrice)
+        : tableManagedPrice;
+      const tableMountedPrice = mountedAddon.pricing[priceKey] ?? mountedAddon.pricing.target;
+      const effectiveMountedPrice = parseFloat(s.customMountedPrice) > 0
+        ? parseFloat(s.customMountedPrice)
+        : tableMountedPrice;
+
+      if (addManagedTB > 0 && plan) {
+        addManagedCost = addManagedTB * effectiveManagedPrice;
+      }
+      if (addMountedBlocks > 0 && plan) {
+        addMountedCost = addMountedBlocks * effectiveMountedPrice;
+      }
+
+      totalSoftwareCost = baseSoftwareCost + addManagedCost + addMountedCost;
+
+      // Included storage
+      const includedManagedTB = plan ? getIncludedManagedTB(s.plan, seats) : 0;
+      const includedMountedTB = plan ? (plan.storage.mounted.includedTB + addMountedBlocks * 10) : 0;
+
+      // Validation
+      if (s.buyingProgram && s.plan && plan && !plan.buyingProgramIds.includes(s.buyingProgram)) {
+        errors.push(`The "${plan.shortName}" plan is not available under ${program?.name || s.buyingProgram}.`);
+      }
+
+      // ── Step 2: Storage ──────────────────────────────────────────────
+      const activeMediaTB = parseFloat(s.activeMediaTB) || 0;
+      const growthPct = parseFloat(s.annualGrowthPct) || 0;
+      const projectedMediaTB = activeMediaTB * (1 + growthPct / 100);
+      const totalIncludedPlusPurchased = includedManagedTB + addManagedTB;
+      const storageGapTB = Math.max(0, projectedMediaTB - totalIncludedPlusPurchased);
+      const dupFactor = s.duplicationFactor && s.duplicationFactor !== '' && s.duplicationFactor !== 'unknown'
+        ? parseFloat(s.duplicationFactor) : null;
+      const currentStorageSpend = parseFloat(s.currentStorageSpend) || 0;
+
+      // Recommended additional storage if gap exists (round up to nearest TB)
+      const recommendedAddTB = storageGapTB > 0 ? Math.ceil(storageGapTB) : 0;
+      const recommendedAddStorageCost = recommendedAddTB > 0
+        ? recommendedAddTB * (managedAddon.pricing[priceKey] ?? managedAddon.pricing.target)
+        : 0;
+
+      // Total investment (software + any recommended additional storage)
+      const totalInvestment = totalSoftwareCost;
+      // Note: we surface additional storage cost separately
+
+      // ── Step 3: ROI ──────────────────────────────────────────────────
+      // participants: use entered value, else assume 2× seat count as a starting point
+      const participants = parseInt(s.participants) > 0
+        ? parseInt(s.participants)
+        : (seats > 0 ? seats * 2 : 0);
+      const hourlyRate = parseFloat(s.hourlyLaborCost) || 0;
+      const minutesSaved = parseFloat(s.minutesSavedPerWeek) || 0;
+      const hardDollarSavings = parseFloat(s.currentSpendToReduce) || 0;
+      const workingWeeks = PC.rules.workingWeeksPerYear;
+
+      // Scenario multipliers
+      const multipliers = { conservative: 0.5, expected: 1.0, 'high-impact': 1.5 };
+      const mult = multipliers[s.activeScenario] || 1.0;
+      const adjMinutesSaved = minutesSaved * mult;
+
+      // Productive capacity recovered (not cash savings, clearly labeled)
+      const productiveCapacityValue = participants > 0 && hourlyRate > 0 && adjMinutesSaved > 0
+        ? participants * (adjMinutesSaved / 60) * hourlyRate * workingWeeks : 0;
+
+      // Total quantified annual value
+      const totalQuantifiedValue = productiveCapacityValue + hardDollarSavings;
+
+      // Net annual value
+      const netAnnualValue = totalQuantifiedValue - totalInvestment;
+
+      // ROI %
+      const roi = totalInvestment > 0 && totalQuantifiedValue > 0
+        ? ((totalQuantifiedValue - totalInvestment) / totalInvestment) * 100 : null;
+
+      // Payback (months)
+      const paybackMonths = totalQuantifiedValue > 0 && totalInvestment > 0
+        ? (totalInvestment / totalQuantifiedValue) * 12 : null;
+
+      // ── Break-even ────────────────────────────────────────────────────
+      const hardDollarsCoverInvestment = hardDollarSavings >= totalInvestment && totalInvestment > 0;
+      const remainingToJustify = hardDollarsCoverInvestment ? 0 : Math.max(0, totalInvestment - hardDollarSavings);
+      let breakEvenMinutes = null;
+      if (!hardDollarsCoverInvestment && participants > 0 && hourlyRate > 0 && remainingToJustify > 0) {
+        breakEvenMinutes = (remainingToJustify / participants / hourlyRate / workingWeeks) * 60;
+      }
+
+      // ── Capacity gap ──────────────────────────────────────────────────
+      const contentGrowthPct = s.contentDemandGrowthPct !== '' ? parseFloat(s.contentDemandGrowthPct) : null;
+      const headcountGrowthPct = s.headcountGrowthPct !== '' ? parseFloat(s.headcountGrowthPct) : null;
+      const capacityGapPct = (contentGrowthPct != null && headcountGrowthPct != null)
+        ? contentGrowthPct - headcountGrowthPct : null;
+
+      // ── Optional review delay ─────────────────────────────────────────
+      const annualProjects = parseFloat(s.annualProjects) || 0;
+      const reviewRounds = parseFloat(s.reviewRoundsPerProject) || 0;
+      const hoursDelayPerReview = parseFloat(s.hoursDelayPerReview) || 0;
+      const reviewDelayHours = annualProjects * reviewRounds * hoursDelayPerReview;
+      const reviewDelayValue = reviewDelayHours > 0 && hourlyRate > 0 ? reviewDelayHours * hourlyRate : 0;
+
+      return {
+        // Plan
+        plan, program, seats, pricePerSeat,
+        tablePricePerSeatRef,
+        effectiveManagedPrice, tableManagedPrice, managedOverrideActive: parseFloat(s.customManagedPrice) > 0,
+        effectiveMountedPrice, tableMountedPrice, mountedOverrideActive: parseFloat(s.customMountedPrice) > 0,
+        priceOverrideActive: parseFloat(s.customPricePerSeat) > 0,
+        // Costs
+        baseSoftwareCost, addManagedCost, addMountedCost, totalSoftwareCost,
+        includedManagedTB, includedMountedTB, addManagedTB,
+        // Storage
+        activeMediaTB, growthPct, projectedMediaTB, storageGapTB,
+        recommendedAddTB, recommendedAddStorageCost,
+        totalIncludedPlusPurchased, dupFactor, currentStorageSpend,
+        // ROI
+        totalInvestment, participants, hourlyRate, adjMinutesSaved,
+        mult, productiveCapacityValue, hardDollarSavings,
+        totalQuantifiedValue, netAnnualValue, roi, paybackMonths,
+        breakEvenMinutes, remainingToJustify, hardDollarsCoverInvestment,
+        // Capacity gap
+        capacityGapPct, contentGrowthPct, headcountGrowthPct,
+        // Review delay
+        reviewDelayHours, reviewDelayValue,
+        // Validation
+        errors, warnings,
+      };
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  SMALL SHARED COMPONENTS
+    // ═══════════════════════════════════════════════════════════════════
+    function Tooltip({ text, children }) {
+      return (
+        <span className="tooltip-wrap cursor-help">
+          {children}
+          <span className="tooltip-box">{text}</span>
+        </span>
+      );
+    }
+
+    function InfoIcon() {
+      return (
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="text-gray-400 ml-1">
+          <circle cx="8" cy="8" r="7.25" stroke="currentColor" strokeWidth="1.5"/>
+          <path d="M8 7v5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          <circle cx="8" cy="4.5" r="0.75" fill="currentColor"/>
+        </svg>
+      );
+    }
+
+    function Label({ children, htmlFor, tip }) {
+      return (
+        <label htmlFor={htmlFor} className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
+          {children}
+          {tip && <Tooltip text={tip}><InfoIcon/></Tooltip>}
+        </label>
+      );
+    }
+
+    function FieldHelp({ children }) {
+      return <p className="mt-1 text-xs text-gray-500">{children}</p>;
+    }
+
+    function FieldError({ msg }) {
+      if (!msg) return null;
+      return <p className="mt-1 text-xs text-red-600 flex items-center gap-1">⚠ {msg}</p>;
+    }
+
+    function Input({ id, type = 'text', value, onChange, prefix, suffix, placeholder, min, max, step, className = '', disabled }) {
+      return (
+        <div className="relative flex items-center">
+          {prefix && <span className="absolute left-3 text-gray-500 text-sm select-none">{prefix}</span>}
+          <input
+            id={id}
+            type={type}
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            placeholder={placeholder}
+            min={min}
+            max={max}
+            step={step}
+            disabled={disabled}
+            className={`field-input w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white
+              ${prefix ? 'pl-7' : ''} ${suffix ? 'pr-10' : ''} ${disabled ? 'bg-gray-50 text-gray-400 cursor-not-allowed' : ''}
+              ${className}`}
+          />
+          {suffix && <span className="absolute right-3 text-gray-500 text-sm select-none">{suffix}</span>}
+        </div>
+      );
+    }
+
+    function Select({ id, value, onChange, options, placeholder = 'Select…', disabled }) {
+      return (
+        <select
+          id={id}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          disabled={disabled}
+          className={`field-input w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white appearance-none
+            ${disabled ? 'bg-gray-50 text-gray-400 cursor-not-allowed' : ''}`}
+        >
+          <option value="">{placeholder}</option>
+          {options.map(o => (
+            <option key={o.value} value={o.value} disabled={o.disabled}>{o.label}</option>
+          ))}
+        </select>
+      );
+    }
+
+    function Card({ children, className = '', emphasis }) {
+      return (
+        <div className={`bg-white rounded-xl border ${emphasis ? 'border-gray-300 shadow-md' : 'border-gray-200 shadow-sm'} p-5 ${className}`}>
+          {children}
+        </div>
+      );
+    }
+
+    function SectionTitle({ children }) {
+      return <h3 className="text-base font-semibold text-gray-900 mb-4">{children}</h3>;
+    }
+
+    function MetricCard({ label, value, sub, color = 'blue', small, tip }) {
+      const colors = {
+        blue:   'bg-gray-100 border-gray-200 text-gray-800',
+        green:  'bg-emerald-50 border-emerald-100 text-emerald-900',
+        amber:  'bg-amber-50 border-amber-100 text-amber-900',
+        gray:   'bg-gray-50 border-gray-100 text-gray-700',
+        purple: 'bg-purple-50 border-purple-100 text-purple-900',
+        red:    'bg-red-50 border-red-100 text-red-900',
+      };
+      return (
+        <div className={`metric-card rounded-xl border p-4 ${colors[color]}`}>
+          <div className="flex items-start justify-between">
+            <span className={`${small ? 'text-xs' : 'text-xs'} font-medium opacity-70 uppercase tracking-wide leading-tight`}>
+              {label}
+            </span>
+            {tip && <Tooltip text={tip}><InfoIcon /></Tooltip>}
+          </div>
+          <div className={`${small ? 'text-xl' : 'text-2xl'} font-bold mt-1 leading-tight`}>{value}</div>
+          {sub && <div className="text-xs opacity-60 mt-0.5">{sub}</div>}
+        </div>
+      );
+    }
+
+    function Alert({ type = 'warning', children }) {
+      const styles = {
+        warning: 'bg-amber-50 border-amber-200 text-amber-800',
+        error: 'bg-red-50 border-red-200 text-red-800',
+        info: 'bg-gray-50 border-gray-200 text-gray-700',
+        success: 'bg-emerald-50 border-emerald-200 text-emerald-800',
+      };
+      return (
+        <div className={`border rounded-lg px-4 py-3 text-sm ${styles[type]}`}>{children}</div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  HEADER
+    // ═══════════════════════════════════════════════════════════════════
+    function Header() {
+      return (
+        <header className="no-print bg-[#1c1c1c] text-white shadow-lg">
+          <div className="max-w-screen-xl mx-auto px-4 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-7 h-7 bg-[#FA0F00] rounded flex items-center justify-center">
+                  <svg viewBox="0 0 20 20" fill="white" width="16" height="16">
+                    <rect x="2" y="2" width="7" height="7" rx="1"/>
+                    <rect x="11" y="2" width="7" height="7" rx="1"/>
+                    <rect x="2" y="11" width="7" height="7" rx="1"/>
+                    <rect x="11" y="11" width="7" height="7" rx="1"/>
+                  </svg>
+                </div>
+                <span className="font-bold text-white text-lg tracking-tight">Frame.io</span>
+                <span className="text-gray-500 text-lg font-light hidden sm:block">|</span>
+                <span className="text-gray-300 text-sm hidden sm:block">ROI &amp; Proposal Builder</span>
+              </div>
+            </div>
+            <div className="text-xs text-gray-500 hidden md:block">
+              Internal Sales Tool &nbsp;·&nbsp; Adobe Confidential
+            </div>
+          </div>
+        </header>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  STEP PROGRESS
+    // ═══════════════════════════════════════════════════════════════════
+    function StepProgress({ current, onGo }) {
+      const steps = [
+        { id: 0, label: 'Customer & Program' },
+        { id: 1, label: 'Storage' },
+        { id: 2, label: 'Workflow & ROI' },
+        { id: 3, label: 'Proposal' },
+      ];
+      return (
+        <div className="no-print bg-white border-b border-gray-200 shadow-sm">
+          <div className="max-w-screen-xl mx-auto px-4">
+            <div className="flex items-center gap-0">
+              {steps.map((step, i) => (
+                <React.Fragment key={step.id}>
+                  <button
+                    onClick={() => onGo(step.id)}
+                    className={`flex items-center gap-2 py-4 px-3 text-sm font-medium transition-colors border-b-2 cursor-pointer
+                      ${current === step.id
+                        ? 'border-[#FA0F00] text-[#FA0F00]'
+                        : step.id < current
+                          ? 'border-transparent text-gray-600 hover:text-gray-900'
+                          : 'border-transparent text-gray-400 cursor-default'}`}
+                    disabled={step.id > current}
+                  >
+                    <span className={`step-dot w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold
+                      ${current === step.id ? 'bg-[#FA0F00] text-white' :
+                        step.id < current ? 'bg-emerald-500 text-white' : 'bg-gray-200 text-gray-500'}`}>
+                      {step.id < current ? '✓' : step.id + 1}
+                    </span>
+                    <span className="hidden sm:block">{step.label}</span>
+                  </button>
+                  {i < steps.length - 1 && (
+                    <div className={`flex-1 h-px mx-1 ${step.id < current ? 'bg-emerald-300' : 'bg-gray-200'}`} />
+                  )}
+                </React.Fragment>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  STEP 1, CUSTOMER & BUYING PROGRAM
+    // ═══════════════════════════════════════════════════════════════════
+    function Step1({ s, u, calc }) {
+      const programOptions = Object.values(PC.buyingPrograms).map(p => ({
+        value: p.id, label: p.name,
+        ...(p.requiresApproval ? { label: `${p.name} ⚠` } : {}),
+      }));
+
+      const availablePlans = s.buyingProgram
+        ? (PC.buyingPrograms[s.buyingProgram]?.availablePlanIds || []).map(id => PC.plans[id])
+        : [];
+
+      function getPlanFeatureSummary(p) {
+        const items = [];
+        items.push({ text: p.storage.managed.label, plus: null });
+        if (p.features.sbwm === 'included') items.push({ text: 'Session watermarking', plus: true });
+        else if (p.features.sbwm === 'requires_combined_sku') items.push({ text: 'SBWM requires combined SKU', plus: false });
+        else if (p.features.sbwm === 'legacy_addon') items.push({ text: 'Watermarking: legacy add-on only', plus: false });
+        if (p.features.forensicWatermarking && p.features.drm && p.features.storageConnect && p.features.secureSharing) {
+          items.push({ text: 'Forensic WM, DRM, Storage Connect, secure sharing', plus: true });
+        } else {
+          if (p.features.forensicWatermarking) items.push({ text: 'Forensic watermarking', plus: true });
+          if (p.features.storageConnect) items.push({ text: 'Storage Connect', plus: true });
+          if (p.features.secureSharing) items.push({ text: 'Secure sharing', plus: true });
+          if (p.features.drm) items.push({ text: 'DRM protection', plus: true });
+        }
+        if (!p.adminConsole) items.push({ text: 'No Adobe Admin Console', plus: false });
+        return items;
+      }
+
+      const priceLevelOptions = [
+        { value: 'target', label: 'Target (recommended)' },
+        { value: 'list',   label: 'List price' },
+        { value: 'floor',  label: 'Floor price' },
+      ];
+
+      const plan = PC.plans[s.plan];
+      const priceKey = s.priceLevel || 'target';
+
+      // Display managed storage add-on pricing
+      const managedAddonPrice = PC.addons.managedStorage.pricing[priceKey];
+      const mountedAddonPrice = PC.addons.mountedStorage.pricing[priceKey];
+
+      return (
+        <div className="space-y-5">
+          <Card>
+            <SectionTitle>Customer Information</SectionTitle>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <Label htmlFor="cname">Company / Account Name <span className="text-red-500">*</span></Label>
+                <Input id="cname" value={s.customerName} onChange={v => u('customerName', v)}
+                  placeholder="Acme Corp" />
+              </div>
+              <div>
+                <Label htmlFor="oname">Opportunity Name <span className="text-gray-400">(optional)</span></Label>
+                <Input id="oname" value={s.opportunityName} onChange={v => u('opportunityName', v)}
+                  placeholder="Frame.io Expansion FY26" />
+              </div>
+            </div>
+          </Card>
+
+          <Card>
+            <SectionTitle>Buying Program &amp; Plan</SectionTitle>
+            {/* Buying Program */}
+            <div className="mb-4 sm:max-w-xs">
+              <Label htmlFor="prog" tip="ETLA is a 3-year commitment. VIP Custom is 1–3 years. Frame Paper is legacy/exception-only.">
+                Buying Program <span className="text-red-500">*</span>
+              </Label>
+              <Select id="prog" value={s.buyingProgram}
+                onChange={v => { u('buyingProgram', v); u('plan', ''); }}
+                options={programOptions} />
+              {s.buyingProgram && PC.buyingPrograms[s.buyingProgram]?.notes?.length > 0 && (
+                <FieldHelp>{PC.buyingPrograms[s.buyingProgram].notes[0]}</FieldHelp>
+              )}
+            </div>
+
+            {/* Plan selection: button cards */}
+            <div className="mb-4">
+              <Label tip="Select includes 2 TB/user managed storage. Prime includes 3 TB/user and all enterprise security features.">
+                Frame Plan <span className="text-red-500">*</span>
+              </Label>
+              {!s.buyingProgram ? (
+                <p className="text-sm text-gray-400 mt-1.5 italic">Choose a buying program above to see available plans.</p>
+              ) : (
+                <div className={`grid gap-2 mt-1.5 ${availablePlans.length <= 2 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1 sm:grid-cols-3'}`}>
+                  {availablePlans.map(p => {
+                    const selected = s.plan === p.id;
+                    const features = getPlanFeatureSummary(p);
+                    return (
+                      <button key={p.id} type="button" onClick={() => u('plan', p.id)}
+                        className={`text-left rounded-xl border-2 p-3 transition-all focus:outline-none
+                          ${selected
+                            ? 'border-[#FA0F00] bg-red-50 shadow-sm'
+                            : 'border-gray-200 bg-white hover:border-gray-300 hover:shadow-sm'}`}>
+                        <div className="flex items-start justify-between mb-2">
+                          <span className={`font-bold text-sm leading-tight ${selected ? 'text-[#FA0F00]' : 'text-gray-900'}`}>
+                            {p.shortName}
+                          </span>
+                          {selected && (
+                            <span className="bg-[#FA0F00] text-white text-[9px] font-bold px-1.5 py-0.5 rounded ml-1 shrink-0 leading-tight">
+                              SELECTED
+                            </span>
+                          )}
+                        </div>
+                        <div className="space-y-0.5">
+                          {features.map((f, i) => (
+                            <div key={i} className={`flex items-start gap-1 text-xs leading-tight
+                              ${i === 0
+                                ? 'text-gray-600 font-medium'
+                                : f.plus === true
+                                  ? (selected ? 'text-emerald-700' : 'text-emerald-600')
+                                  : 'text-gray-400'}`}>
+                              <span className="shrink-0 mt-px">{i === 0 ? '·' : f.plus === true ? '+' : '·'}</span>
+                              <span>{f.text}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Standard seat count */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+              <div>
+                <Label htmlFor="seats" tip="Minimum 10 seats required. All Frame licenses are seat-based.">
+                  Number of Seats <span className="text-red-500">*</span>
+                </Label>
+                <Input id="seats" type="number" value={s.seats}
+                  onChange={v => u('seats', v)} placeholder="10" min="10" step="1" />
+                <FieldHelp>Minimum 10 seats.</FieldHelp>
+              </div>
+              <div>
+                <Label htmlFor="plvl" tip="Target is the recommended starting price. Use List only if needed for comparison.">
+                  Price Level
+                </Label>
+                <Select id="plvl" value={s.priceLevel} onChange={v => u('priceLevel', v)}
+                  options={priceLevelOptions} />
+              </div>
+            </div>
+
+            {/* Per-seat negotiated price, ETLA and VIP Custom only */}
+            {plan && calc.seats >= 10 && ['etla', 'vipc'].includes(s.buyingProgram) && (
+              <div className="mt-4 pt-4 border-t border-gray-100">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
+                  Negotiated Per-Seat Price <span className="font-normal text-gray-400 normal-case">(optional; overrides table price)</span>
+                </p>
+                <Label htmlFor="custPps" tip="Enter a negotiated per-seat price to override the standard table pricing. Leave blank to use the calculated price.">
+                  Per-Seat Price Override
+                </Label>
+                {calc.tablePricePerSeatRef != null && (() => {
+                  const tiers = plan.pricing?.tiers;
+                  const seatsN = calc.seats;
+                  const tier = tiers?.find(t => seatsN >= t.min && (t.max == null || seatsN <= t.max));
+                  const pricingRef = tier || plan.pricing?.perSeat;
+                  return pricingRef ? (
+                    <div className="text-xs text-gray-500 mb-1.5 flex gap-3">
+                      <span>List: <strong>{fmt.currency(pricingRef.list)}</strong></span>
+                      <span>Target: <strong>{fmt.currency(pricingRef.target)}</strong></span>
+                      {pricingRef.floor && <span>Floor: <strong>{fmt.currency(pricingRef.floor)}</strong></span>}
+                    </div>
+                  ) : null;
+                })()}
+                <Input id="custPps" type="number" value={s.customPricePerSeat}
+                  onChange={v => u('customPricePerSeat', v)} prefix="$" suffix="/seat/yr"
+                  placeholder={calc.tablePricePerSeatRef != null ? String(Math.round(calc.tablePricePerSeatRef)) : 'table price'} />
+                {calc.priceOverrideActive && (
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-xs text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">
+                      Override active, table price was {fmt.currency(calc.tablePricePerSeatRef)}
+                    </span>
+                    <button onClick={() => u('customPricePerSeat', '')}
+                      className="text-xs text-gray-400 hover:text-gray-600 underline">reset</button>
+                  </div>
+                )}
+              </div>
+            )}
+
+          {/* Validation alerts */}
+            {calc.errors.length > 0 && calc.errors.map((e, i) => (
+              <Alert key={i} type="error">{e}</Alert>
+            ))}
+            {calc.warnings.length > 0 && calc.warnings.map((w, i) => (
+              <Alert key={i} type="warning">{w}</Alert>
+            ))}
+          </Card>
+
+          {/* Add-ons */}
+          {plan && (
+            <Card>
+              <SectionTitle>Storage Add-ons <span className="text-gray-400 font-normal text-sm">(optional)</span></SectionTitle>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="addMgd"
+                    tip={`Additional managed storage. Included: ${fmt.tb(calc.includedManagedTB)} from your plan.`}>
+                    Additional Managed Storage (TB)
+                  </Label>
+                  <Input id="addMgd" type="number" value={s.additionalManagedTB}
+                    onChange={v => u('additionalManagedTB', v)} suffix="TB" placeholder="0" min="0" step="1" />
+                  <FieldHelp>
+                    {calc.managedOverrideActive
+                      ? <span>{fmt.currency(calc.effectiveManagedPrice)}/TB/year <span className="text-amber-600">(negotiated)</span> · Included: {fmt.tb(calc.includedManagedTB)}</span>
+                      : `${fmt.currency(managedAddonPrice)}/TB/year · Included: ${fmt.tb(calc.includedManagedTB)}`}
+                  </FieldHelp>
+                  {parseFloat(s.additionalManagedTB) > 0 && ['etla', 'vipc'].includes(s.buyingProgram) && (
+                    <div className="mt-2 pt-2 border-t border-gray-100">
+                      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
+                        Negotiated Price <span className="font-normal normal-case text-gray-400">(per TB, optional)</span>
+                      </p>
+                      <div className="text-xs text-gray-500 mb-1.5 flex gap-3">
+                        <span>List: <strong>$720</strong></span>
+                        <span>Target: <strong>$540</strong></span>
+                        <span>Floor: <strong>$432</strong></span>
+                      </div>
+                      <Input id="custMgd" type="number" value={s.customManagedPrice}
+                        onChange={v => u('customManagedPrice', v)} prefix="$" suffix="/TB/yr"
+                        placeholder={String(calc.tableManagedPrice)} />
+                      {calc.managedOverrideActive && (
+                        <div className="mt-1 flex items-center gap-2">
+                          <span className="text-xs text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">
+                            Override active, table was {fmt.currency(calc.tableManagedPrice)}
+                          </span>
+                          <button onClick={() => u('customManagedPrice', '')}
+                            className="text-xs text-gray-400 hover:text-gray-600 underline">reset</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <Label htmlFor="addMnt"
+                    tip={`Mounted storage lets users access Frame.io as a local drive. ${fmt.currency(mountedAddonPrice)}/10TB block/year. 2TB included per account.`}>
+                    Additional Mounted Storage (10TB blocks)
+                  </Label>
+                  <Input id="addMnt" type="number" value={s.additionalMountedBlocks}
+                    onChange={v => u('additionalMountedBlocks', v)} placeholder="0" min="0" step="1" />
+                  <FieldHelp>
+                    {calc.mountedOverrideActive
+                      ? <span>{fmt.currency(calc.effectiveMountedPrice)}/10TB block/year <span className="text-amber-600">(negotiated)</span> · Included: 2 TB per account</span>
+                      : `${fmt.currency(mountedAddonPrice)}/10TB block/year · Included: 2 TB per account`}
+                  </FieldHelp>
+                  {parseInt(s.additionalMountedBlocks) > 0 && ['etla', 'vipc'].includes(s.buyingProgram) && (
+                    <div className="mt-2 pt-2 border-t border-gray-100">
+                      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
+                        Negotiated Price <span className="font-normal normal-case text-gray-400">(per 10 TB block, optional)</span>
+                      </p>
+                      <div className="text-xs text-gray-500 mb-1.5 flex gap-3">
+                        <span>List: <strong>$9,600</strong></span>
+                        <span>Target: <strong>$7,680</strong></span>
+                        <span>Floor: <strong>$7,296</strong></span>
+                      </div>
+                      <Input id="custMnt" type="number" value={s.customMountedPrice}
+                        onChange={v => u('customMountedPrice', v)} prefix="$" suffix="/10TB"
+                        placeholder={String(calc.tableMountedPrice)} />
+                      {calc.mountedOverrideActive && (
+                        <div className="mt-1 flex items-center gap-2">
+                          <span className="text-xs text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">
+                            Override active, table was {fmt.currency(calc.tableMountedPrice)}
+                          </span>
+                          <button onClick={() => u('customMountedPrice', '')}
+                            className="text-xs text-gray-400 hover:text-gray-600 underline">reset</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Card>
+          )}
+
+          {/* Plan feature summary */}
+          {plan && (
+            <Card>
+              <SectionTitle>Plan Summary</SectionTitle>
+              <div className="space-y-2">
+                {plan.notes.map((n, i) => (
+                  <div key={i} className="flex items-start gap-2 text-sm text-gray-700">
+                    <span className="text-gray-400 mt-0.5 shrink-0">ℹ</span>
+                    <span>{n}</span>
+                  </div>
+                ))}
+              </div>
+              {plan.features.sbwm === 'requires_combined_sku' && (
+                <Alert type="info" className="mt-3">
+                  To add Session-Based Watermarking, use the "Select with SBWM" plan instead.
+                </Alert>
+              )}
+            </Card>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  STEP 2, STORAGE / MEDIA REQUIREMENTS
+    // ═══════════════════════════════════════════════════════════════════
+    function Step2({ s, u, calc }) {
+      const dupOptions = [
+        { value: '', label: 'Not sure / skip' },
+        { value: '1', label: '1× (no duplication)' },
+        { value: '1.5', label: '1.5× (some working copies)' },
+        { value: '2', label: '2× (common proxy/working copy pattern)' },
+        { value: '3', label: '3× (high duplication)' },
+        { value: '4', label: '4× (very high duplication)' },
+        { value: 'unknown', label: 'Unknown' },
+      ];
+
+      return (
+        <div className="space-y-5">
+          <Card>
+            <SectionTitle>Media &amp; Storage Profile</SectionTitle>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <Label htmlFor="media" tip="Total active working media the team manages (not archive): video, image, audio, project files.">
+                  Current Active Media Volume
+                </Label>
+                <Input id="media" type="number" value={s.activeMediaTB}
+                  onChange={v => u('activeMediaTB', v)} suffix="TB" placeholder="e.g. 25" min="0" step="0.5" />
+                <FieldHelp>Active / working media only. Do not include archival or cold storage.</FieldHelp>
+              </div>
+              <div>
+                <Label htmlFor="growth" tip="How fast is the active media volume growing year over year?">
+                  Estimated Annual Media Growth
+                </Label>
+                <Input id="growth" type="number" value={s.annualGrowthPct}
+                  onChange={v => u('annualGrowthPct', v)} suffix="%" placeholder="e.g. 20" min="0" max="200" />
+              </div>
+              <div>
+                <Label htmlFor="sspend" tip="Annual spend on storage, cloud transfer fees, NAS hardware, proxy generation services, or tools that could be reduced.">
+                  Current Annual Storage / Infrastructure Spend <span className="text-gray-400">(optional)</span>
+                </Label>
+                <Input id="sspend" type="number" value={s.currentStorageSpend}
+                  onChange={v => u('currentStorageSpend', v)} prefix="$" placeholder="0" min="0" />
+                <FieldHelp>Include only spend realistically reducible with Frame.</FieldHelp>
+              </div>
+              <div>
+                <Label htmlFor="dup"
+                  tip="If the team maintains working copies, proxies, or local duplicates, the effective storage footprint is larger than the source files. This is context, not an automatic savings claim.">
+                  Estimated Duplication Factor <span className="text-gray-400">(optional)</span>
+                </Label>
+                <Select id="dup" value={s.duplicationFactor}
+                  onChange={v => u('duplicationFactor', v)} options={dupOptions} />
+                <FieldHelp>Used as context; not assumed to be eliminable.</FieldHelp>
+              </div>
+            </div>
+          </Card>
+
+          {/* Storage analysis */}
+          {calc.activeMediaTB > 0 && calc.plan && (
+            <Card emphasis>
+              <SectionTitle>Storage Analysis</SectionTitle>
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <MetricCard label="Current Active Media" value={fmt.tb(calc.activeMediaTB)} color="gray" small />
+                <MetricCard label="Projected (12 months)" value={fmt.tb(calc.projectedMediaTB)}
+                  sub={calc.growthPct > 0 ? `+${calc.growthPct}% growth` : 'No growth entered'} color="blue" small />
+                <MetricCard label="Included Managed Storage" value={fmt.tb(calc.includedManagedTB)}
+                  sub={calc.plan?.storage.managed.label} color="green" small />
+                <MetricCard
+                  label={calc.storageGapTB > 0 ? 'Shortfall (need more storage)' : 'Storage Headroom'}
+                  value={calc.storageGapTB > 0 ? fmt.tb(calc.storageGapTB) : fmt.tb(calc.totalIncludedPlusPurchased - calc.projectedMediaTB)}
+                  color={calc.storageGapTB > 0 ? 'amber' : 'green'} small />
+              </div>
+
+              {calc.storageGapTB > 0 && (
+                <Alert type="warning">
+                  <strong>Storage gap detected.</strong> The selected plan includes {fmt.tb(calc.includedManagedTB)} managed storage,
+                  but your projected 12-month media volume is {fmt.tb(calc.projectedMediaTB)}.
+                  Adding approximately <strong>{fmt.tb(calc.recommendedAddTB)}</strong> of managed storage
+                  would cover the gap, estimated cost at {fmt.currency(PC.addons.managedStorage.pricing[s.priceLevel] ?? PC.addons.managedStorage.pricing.target)}/TB:
+                  {' '}<strong>{fmt.currency(calc.recommendedAddStorageCost)}/year</strong>.
+                  <br />
+                  <span className="text-xs mt-1 block opacity-80">You can add this in Step 1 under "Additional Managed Storage."</span>
+                </Alert>
+              )}
+
+              {calc.dupFactor != null && (
+                <div className="mt-3 bg-gray-50 rounded-lg p-3 text-sm text-gray-700">
+                  <strong>Duplication context:</strong> At {calc.dupFactor}× duplication, the team's total storage footprint
+                  may be ~{fmt.tb(calc.activeMediaTB * calc.dupFactor)} across all copies.
+                  Frame's mounted storage model (files stream on-demand from a single cloud source)
+                  can reduce the need for redundant local copies and proxies. The degree of reduction
+                  depends on workflow, and no specific reduction is assumed here.
+                </div>
+              )}
+
+              {calc.currentStorageSpend > 0 && (
+                <div className="mt-3 bg-gray-50 rounded-lg p-3 text-sm text-gray-700">
+                  Current storage/infrastructure spend of <strong>{fmt.currency(calc.currentStorageSpend)}/year</strong> is
+                  noted. Enter any portion realistically reducible by Frame in Step 3 under "Hard-Dollar Savings."
+                </div>
+              )}
+
+              <div className="mt-3 text-xs text-gray-500">
+                Mounted storage (2 TB included per account; additional 10 TB blocks available) streams media on demand,
+                eliminating the need to sync or download before editing. This may reduce local storage requirements
+                and manual transfer overhead, but actual reduction depends on your team's workflow.
+              </div>
+            </Card>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  STEP 3, WORKFLOW / ROI DISCOVERY
+    // ═══════════════════════════════════════════════════════════════════
+    function Step3({ s, u, calc }) {
+      const frictionExamples = [
+        'uploading or downloading large media files',
+        'moving files between tools or people',
+        'finding the correct version of an asset',
+        'creating, converting, or managing proxy files',
+        'chasing approvals via email, Slack, or meetings',
+        'reconciling feedback from multiple sources',
+        'waiting for media transfers to complete',
+        'sharing files securely with external reviewers',
+      ];
+
+      return (
+        <div className="space-y-5">
+          <Card>
+            <SectionTitle>Team &amp; Labor</SectionTitle>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <Label htmlFor="ppl"
+                  tip="People who regularly participate in production, review, approval, or media management. Include stakeholders who review work, not only creators.">
+                  Participating Users <span className="text-red-500">*</span>
+                </Label>
+                <Input id="ppl" type="number" value={s.participants}
+                  onChange={v => u('participants', v)}
+                  placeholder={calc.seats > 0 ? String(calc.seats * 2) : 'e.g. 25'} min="1" />
+                <FieldHelp>
+                  {s.participants
+                    ? 'Include everyone who touches review, approval, or media management.'
+                    : calc.seats > 0
+                      ? `Defaulting to 2× seat count (${calc.seats * 2}). Adjust if broader team participates.`
+                      : 'Include everyone who touches review, approval, or media management.'}
+                </FieldHelp>
+              </div>
+              <div>
+                <Label htmlFor="rate"
+                  tip="Fully loaded hourly cost including salary, benefits, and overhead. Used to calculate the dollar value of time saved.">
+                  Avg. Fully Loaded Hourly Cost <span className="text-red-500">*</span>
+                </Label>
+                <Input id="rate" type="number" value={s.hourlyLaborCost}
+                  onChange={v => u('hourlyLaborCost', v)} prefix="$" placeholder="75" min="1" />
+                <FieldHelp>Blended fully-loaded rate across participants. Default: $75/hr.</FieldHelp>
+              </div>
+              <div>
+                <Label htmlFor="mins"
+                  tip="Be conservative. This is the number that drives break-even: the tool will show how many minutes are actually needed for the investment to pay for itself.">
+                  Est. Minutes Saved / Person / Week <span className="text-red-500">*</span>
+                </Label>
+                <Input id="mins" type="number" value={s.minutesSavedPerWeek}
+                  onChange={v => u('minutesSavedPerWeek', v)} suffix="min/wk" placeholder="30" min="0" max="480" />
+                <div className="mt-2 bg-gray-50 rounded-lg p-3 text-xs text-gray-600 space-y-1">
+                  <p className="font-medium text-gray-700 mb-1">Examples of workflow friction to quantify:</p>
+                  {frictionExamples.map((ex, i) => (
+                    <div key={i} className="flex items-start gap-1.5">
+                      <span className="text-gray-400 shrink-0 mt-0.5">›</span>
+                      <span>{ex}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          <Card>
+            <SectionTitle>Hard-Dollar Savings <span className="text-gray-400 font-normal text-sm">(optional; enter only what's realistic)</span></SectionTitle>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <Label htmlFor="hdsave"
+                  tip="Annual spend on storage, transfer fees, redundant tools, or infrastructure that Frame could realistically reduce. Do not include productivity capacity here.">
+                  Current Annual Spend That Could Be Reduced
+                </Label>
+                <Input id="hdsave" type="number" value={s.currentSpendToReduce}
+                  onChange={v => u('currentSpendToReduce', v)} prefix="$" placeholder="0" min="0" />
+                <FieldHelp>Storage costs, file transfer fees, redundant review tools, local NAS, etc.</FieldHelp>
+              </div>
+            </div>
+            <p className="mt-3 text-xs text-gray-500">
+              Hard-dollar savings represent actual spend that may be eliminated or reduced, not productivity estimates.
+              These are subtracted from the Frame investment to calculate the remaining productivity hurdle.
+            </p>
+          </Card>
+
+          <Card>
+            <SectionTitle>Additional Context <span className="text-gray-400 font-normal text-sm">(optional; not required for ROI output)</span></SectionTitle>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <Label htmlFor="proj">Annual Projects / Campaigns</Label>
+                <Input id="proj" type="number" value={s.annualProjects}
+                  onChange={v => u('annualProjects', v)} placeholder="e.g. 50" min="0" />
+              </div>
+              <div>
+                <Label htmlFor="rr">Avg. Review Rounds per Project</Label>
+                <Input id="rr" type="number" value={s.reviewRoundsPerProject}
+                  onChange={v => u('reviewRoundsPerProject', v)} placeholder="e.g. 3" min="0" step="0.5" />
+              </div>
+              <div>
+                <Label htmlFor="rh" tip="Hours lost to review coordination delays: scheduling, consolidating feedback, chasing approvals.">
+                  Hours of Coordination Delay per Review Round
+                </Label>
+                <Input id="rh" type="number" value={s.hoursDelayPerReview}
+                  onChange={v => u('hoursDelayPerReview', v)} suffix="hrs" placeholder="e.g. 2" min="0" step="0.5" />
+              </div>
+              <div style={{opacity:0}} aria-hidden="true" />
+            </div>
+          </Card>
+
+          <Card>
+            <SectionTitle>Capacity Gap Analysis <span className="text-gray-400 font-normal text-sm">(optional)</span></SectionTitle>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <Label htmlFor="cdg" tip="Expected increase in content output, projects, or campaigns next year.">
+                  Expected Content Demand Growth
+                </Label>
+                <Input id="cdg" type="number" value={s.contentDemandGrowthPct}
+                  onChange={v => u('contentDemandGrowthPct', v)} suffix="%" placeholder="e.g. 30" min="0" max="300" />
+              </div>
+              <div>
+                <Label htmlFor="hcg" tip="Expected growth in creative/content headcount next year.">
+                  Expected Creative Headcount Growth
+                </Label>
+                <Input id="hcg" type="number" value={s.headcountGrowthPct}
+                  onChange={v => u('headcountGrowthPct', v)} suffix="%" placeholder="e.g. 5" min="0" max="100" />
+              </div>
+            </div>
+            {calc.capacityGapPct != null && calc.capacityGapPct > 0 && (
+              <div className="mt-3 bg-amber-50 border border-amber-100 rounded-lg p-3 text-sm text-amber-800">
+                <strong>Capacity gap: {fmt.num(calc.capacityGapPct)} percentage points.</strong>
+                {' '}Content demand is expected to grow {fmt.pct(calc.contentGrowthPct)} while creative headcount
+                grows only {fmt.pct(calc.headcountGrowthPct)}. The organization will need meaningfully more throughput
+                from its existing team. Frame can help reduce coordination overhead and accelerate delivery cycles,
+                though it is not a complete substitute for headcount.
+              </div>
+            )}
+          </Card>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  SCENARIO SELECTOR
+    // ═══════════════════════════════════════════════════════════════════
+    function ScenarioSelector({ value, onChange }) {
+      const scenarios = [
+        { id: 'conservative', label: 'Conservative', desc: '50% of entered productivity estimate', color: 'text-gray-600' },
+        { id: 'expected',     label: 'Expected',     desc: 'Entered estimate as-is',              color: 'text-blue-700' },
+        { id: 'high-impact',  label: 'High-Impact',  desc: '150% of entered estimate',           color: 'text-emerald-700' },
+      ];
+      return (
+        <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
+          {scenarios.map(sc => (
+            <button key={sc.id}
+              onClick={() => onChange(sc.id)}
+              className={`scenario-tab flex-1 py-1.5 px-2 rounded-md text-xs font-medium
+                ${value === sc.id ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}
+            >
+              {sc.label}
+            </button>
+          ))}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  LIVE RESULTS PANEL (steps 1–3 sidebar)
+    // ═══════════════════════════════════════════════════════════════════
+    function ResultsPanel({ s, u, calc, currentStep }) {
+      const hasInvestment = calc.totalSoftwareCost > 0;
+      const hasROI = calc.productiveCapacityValue > 0 || calc.hardDollarSavings > 0;
+
+      return (
+        <div className="space-y-4">
+          {/* Investment summary */}
+          {hasInvestment && (
+            <Card>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-gray-700">Investment Summary</h3>
+                {currentStep >= 2 && (
+                  <ScenarioSelector value={s.activeScenario} onChange={v => u('activeScenario', v)} />
+                )}
+              </div>
+
+              <div className="space-y-2 mb-3">
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-600">{calc.plan?.shortName} × {fmt.num(calc.seats)} seats</span>
+                  <span className="font-medium">{fmt.currency(calc.baseSoftwareCost)}</span>
+                </div>
+                {calc.addManagedCost > 0 && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">+ {fmt.tb(calc.addManagedTB)} managed storage</span>
+                    <span className="font-medium">{fmt.currency(calc.addManagedCost)}</span>
+                  </div>
+                )}
+                {calc.addMountedCost > 0 && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">+ Mounted storage add-on</span>
+                    <span className="font-medium">{fmt.currency(calc.addMountedCost)}</span>
+                  </div>
+                )}
+                </div>
+
+              <div className="mt-3 space-y-2">
+                <div className="bg-[#FA0F00] rounded-xl px-4 py-3 text-white">
+                  <div className="text-xs font-semibold uppercase tracking-wide opacity-80 mb-0.5">Est. Annual Investment</div>
+                  <div className="text-3xl font-black leading-tight">{fmt.currency(calc.totalSoftwareCost)}</div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="bg-[#1c1c1c] rounded-xl px-3 py-3 text-white">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide opacity-60 mb-1">Managed Storage</div>
+                    <div className="text-xl font-bold leading-tight">{fmt.tb(calc.includedManagedTB)}</div>
+                    <div className="text-xs opacity-50">included</div>
+                  </div>
+                  <div className="bg-[#1c1c1c] rounded-xl px-3 py-3 text-white">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide opacity-60 mb-1">Mounted Storage</div>
+                    <div className="text-xl font-bold leading-tight">{fmt.tb(calc.includedMountedTB)}</div>
+                    <div className="text-xs opacity-50">total</div>
+                  </div>
+                </div>
+                {calc.pricePerSeat != null && (
+                  <div className="text-xs text-gray-500 text-center">
+                    {fmt.currency(calc.pricePerSeat)}/seat · {s.priceLevel} price
+                    {calc.priceOverrideActive && <span className="text-amber-600 ml-1">(negotiated)</span>}
+                  </div>
+                )}
+              </div>
+            </Card>
+          )}
+
+          {/* Break-even hero */}
+          {hasROI && calc.totalInvestment > 0 && (
+            <div className={`rounded-xl p-5 ${calc.hardDollarsCoverInvestment
+              ? 'bg-emerald-600' : 'bg-[#1c1c1c]'} text-white`}>
+              {calc.hardDollarsCoverInvestment ? (
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide opacity-80 mb-2">Break-Even</div>
+                  <div className="text-lg font-bold">Hard-dollar savings cover the full investment.</div>
+                  <div className="text-sm opacity-80 mt-1">Any productivity gains are entirely additive value.</div>
+                </div>
+              ) : (
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide opacity-80 mb-2">Break-Even Threshold</div>
+                  <div className="breakeven-num">{fmt.num(calc.breakEvenMinutes, 0)}</div>
+                  <div className="text-sm font-medium mt-1 opacity-90">minutes saved / person / week</div>
+                  <div className="text-xs opacity-70 mt-2">
+                    Frame needs to recover only {fmt.num(calc.breakEvenMinutes, 0)} min/person/week
+                    {calc.hardDollarSavings > 0 ? ` after ${fmt.currency(calc.hardDollarSavings)} in hard-dollar savings` : ''} to pay for itself.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ROI metrics */}
+          {hasROI && (
+            <Card>
+              <h3 className="text-sm font-semibold text-gray-700 mb-3">
+                Estimated Annual Value
+                {s.activeScenario !== 'expected' && (
+                  <span className={`ml-2 text-xs font-normal px-1.5 py-0.5 rounded
+                    ${s.activeScenario === 'conservative' ? 'bg-gray-100 text-gray-600' : 'bg-emerald-100 text-emerald-700'}`}>
+                    {s.activeScenario === 'conservative' ? 'Conservative' : 'High-Impact'}
+                  </span>
+                )}
+              </h3>
+              <div className="space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-600 flex items-center gap-1">
+                    Productive capacity recovered
+                    <Tooltip text="Value of employee time potentially returned to higher-value work. This is capacity value, not cash savings.">
+                      <InfoIcon />
+                    </Tooltip>
+                  </span>
+                  <span className="font-medium">{fmt.currency(calc.productiveCapacityValue)}</span>
+                </div>
+                {calc.hardDollarSavings > 0 && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600 flex items-center gap-1">
+                      Hard-dollar savings
+                      <Tooltip text="Actual spend that may be eliminated or reduced: storage, tools, infrastructure.">
+                        <InfoIcon />
+                      </Tooltip>
+                    </span>
+                    <span className="font-medium">{fmt.currency(calc.hardDollarSavings)}</span>
+                  </div>
+                )}
+                <div className="border-t pt-2 flex justify-between font-semibold text-sm">
+                  <span>Total quantified value</span>
+                  <span className="text-emerald-700">{fmt.currency(calc.totalQuantifiedValue)}</span>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 mt-3">
+                {calc.roi != null && (
+                  <MetricCard label="Est. ROI" value={fmt.pct(calc.roi, 0)}
+                    color={calc.roi >= 0 ? 'green' : 'red'} small
+                    tip="(Total quantified value − Frame investment) ÷ Frame investment × 100. Based on inputs entered." />
+                )}
+                {calc.paybackMonths != null && (
+                  <MetricCard label="Est. Payback" value={fmt.months(calc.paybackMonths)} color="blue" small
+                    tip="Frame investment ÷ total quantified annual value × 12. Based on inputs entered." />
+                )}
+              </div>
+              <p className="text-xs text-gray-400 mt-2">
+                Based on {fmt.num(calc.participants)} participants × {fmt.num(calc.adjMinutesSaved, 0)} min/wk at {fmt.currency(calc.hourlyRate)}/hr × 48 working weeks.
+              </p>
+            </Card>
+          )}
+
+          {/* Capacity gap */}
+          {calc.capacityGapPct != null && calc.capacityGapPct > 0 && (
+            <Card>
+              <h3 className="text-sm font-semibold text-amber-800 mb-1">Capacity Gap</h3>
+              <p className="text-2xl font-bold text-amber-700">+{fmt.num(calc.capacityGapPct)} pp</p>
+              <p className="text-xs text-amber-700 mt-1">
+                Content demand +{fmt.pct(calc.contentGrowthPct)} vs. headcount +{fmt.pct(calc.headcountGrowthPct)}
+              </p>
+            </Card>
+          )}
+
+          {!hasInvestment && (
+            <div className="text-center text-gray-400 text-sm py-8">
+              Complete Step 1 to see your investment estimate here.
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  ASSUMPTIONS PANEL
+    // ═══════════════════════════════════════════════════════════════════
+    function AssumptionsPanel({ s, u, calc }) {
+      const [open, setOpen] = useState(false);
+
+      if (!calc.totalInvestment) return null;
+
+      const rows = [
+        { label: 'Plan', value: calc.plan?.name || '-' },
+        { label: 'Buying Program', value: calc.program?.fullName || '-' },
+        { label: 'Seats', value: fmt.num(calc.seats) },
+        { label: 'Price per seat', value: calc.pricePerSeat != null ? fmt.currency(calc.pricePerSeat) : '-' },
+        { label: 'Price level', value: s.priceLevel },
+        { label: 'Base software cost', value: fmt.currency(calc.baseSoftwareCost) },
+        { label: 'Additional managed storage', value: calc.addManagedTB > 0 ? `${fmt.tb(calc.addManagedTB)} × ${fmt.currency(PC.addons.managedStorage.pricing[s.priceLevel]??PC.addons.managedStorage.pricing.target)}/TB` : '-' },
+        { label: 'Additional mounted storage', value: parseInt(s.additionalMountedBlocks) > 0 ? `${s.additionalMountedBlocks} × 10TB blocks` : '-' },
+        { label: 'Included managed storage', value: fmt.tb(calc.includedManagedTB) },
+        { label: 'Included mounted storage', value: fmt.tb(calc.includedMountedTB) },
+        { label: 'Total annual investment', value: fmt.currency(calc.totalInvestment) },
+        null,
+        { label: 'Active media (current)', value: fmt.tb(calc.activeMediaTB) },
+        { label: 'Projected media (12 mo)', value: fmt.tb(calc.projectedMediaTB) },
+        { label: 'Duplication factor', value: calc.dupFactor != null ? `${calc.dupFactor}×` : 'Not entered' },
+        null,
+        { label: 'Participants', value: fmt.num(calc.participants), editable: true, field: 'participants' },
+        { label: 'Hourly labor cost', value: fmt.currency(calc.hourlyRate), editable: true, field: 'hourlyLaborCost' },
+        { label: 'Minutes saved / person / week', value: fmt.num(parseFloat(s.minutesSavedPerWeek)||0, 0), editable: true, field: 'minutesSavedPerWeek' },
+        { label: 'Scenario multiplier', value: `${calc.mult}× (${s.activeScenario})` },
+        { label: 'Adjusted minutes saved', value: fmt.num(calc.adjMinutesSaved, 0) + '/person/week' },
+        { label: 'Working weeks / year', value: fmt.num(PC.rules.workingWeeksPerYear) },
+        { label: 'Hard-dollar savings', value: fmt.currency(calc.hardDollarSavings), editable: true, field: 'currentSpendToReduce' },
+        null,
+        { label: 'Productive capacity value', value: fmt.currency(calc.productiveCapacityValue) },
+        { label: 'Total quantified value', value: fmt.currency(calc.totalQuantifiedValue) },
+        { label: 'Net annual value', value: fmt.currency(calc.netAnnualValue) },
+        { label: 'Estimated ROI', value: fmt.pct(calc.roi, 0) },
+        { label: 'Estimated payback', value: fmt.months(calc.paybackMonths) },
+        { label: 'Break-even (min/person/wk)', value: calc.breakEvenMinutes != null ? fmt.num(calc.breakEvenMinutes, 1) : 'N/A' },
+      ];
+
+      return (
+        <div className="mt-4 border border-gray-200 rounded-xl overflow-hidden">
+          <button
+            onClick={() => setOpen(!open)}
+            className="w-full flex items-center justify-between px-5 py-3 bg-gray-50 text-sm font-medium text-gray-700 hover:bg-gray-100 transition-colors"
+          >
+            <span>Assumptions &amp; Inputs (edit any value)</span>
+            <span className="text-gray-400">{open ? '▲' : '▼'}</span>
+          </button>
+          {open && (
+            <div className="bg-white px-5 py-4">
+              <p className="text-xs text-gray-500 mb-3">
+                All values driving the calculations. Edit the fields marked with a pencil (✏) to update outputs without navigating to the original step.
+              </p>
+              <table className="w-full text-xs">
+                <tbody>
+                  {rows.map((row, i) => {
+                    if (!row) return <tr key={i}><td colSpan={2} className="py-1"><div className="border-t border-gray-100" /></td></tr>;
+                    return (
+                      <tr key={i} className="border-b border-gray-50">
+                        <td className="py-1.5 pr-4 text-gray-500 w-1/2">{row.label}</td>
+                        <td className="py-1.5 font-medium text-gray-900 text-right">
+                          {row.editable ? (
+                            <input
+                              type="number"
+                              value={s[row.field]}
+                              onChange={e => u(row.field, e.target.value)}
+                              className="w-24 text-right border border-gray-200 rounded px-2 py-0.5 text-xs field-input"
+                            />
+                          ) : row.value}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  EXECUTIVE NARRATIVE GENERATOR
+    // ═══════════════════════════════════════════════════════════════════
+    function generateNarrative(s, calc) {
+      if (!calc.totalInvestment || !calc.plan) return '';
+      const name = s.customerName || 'this organization';
+      const planName = calc.plan.shortName;
+      const invest = fmt.currency(calc.totalInvestment);
+
+      let text = '';
+
+      if (calc.hardDollarsCoverInvestment) {
+        text += `Based on the workflow profile provided, the modeled hard-dollar savings of ${fmt.currency(calc.hardDollarSavings)} per year are estimated to fully offset the annual Frame.io ${planName} investment of ${invest}. `;
+        text += `Any productivity gains represent entirely additional value on top of the investment.`;
+      } else {
+        text += `Based on ${name}'s current workflow profile, Frame.io does not require a dramatic productivity improvement to justify the investment. `;
+        if (calc.breakEvenMinutes != null) {
+          text += `At an estimated annual investment of ${invest}, Frame would need to recover approximately ${fmt.num(calc.breakEvenMinutes, 0)} minutes per participant per week to reach break-even. `;
+        }
+      }
+
+      // Friction context
+      if (s.minutesSavedPerWeek) {
+        const frictionAreas = [];
+        if (s.activeMediaTB) frictionAreas.push('file movement and media access');
+        frictionAreas.push('version management');
+        frictionAreas.push('review coordination');
+        frictionAreas.push('feedback consolidation');
+        text += `The team identified ${frictionAreas.join(', ')} as recurring sources of workflow friction. `;
+      }
+
+      // Value summary
+      if (calc.productiveCapacityValue > 0) {
+        text += `Reducing even a portion of that overhead creates a credible path to positive ROI, estimated at ${fmt.currency(calc.productiveCapacityValue)} in productive capacity annually under the expected scenario. `;
+      }
+
+      if (calc.hardDollarSavings > 0 && !calc.hardDollarsCoverInvestment) {
+        text += `An additional ${fmt.currency(calc.hardDollarSavings)} in hard-dollar savings from storage, transfer, or redundant tool consolidation was identified. `;
+      }
+
+      // ROI / payback
+      if (calc.roi != null && calc.roi > 0) {
+        text += `At these assumptions, the estimated ROI is ${fmt.pct(calc.roi, 0)} with a ${fmt.months(calc.paybackMonths)} payback period. `;
+      }
+
+      // Capacity gap
+      if (calc.capacityGapPct != null && calc.capacityGapPct > 0) {
+        text += `With content demand expected to grow ${fmt.pct(calc.contentGrowthPct)} while headcount grows only ${fmt.pct(calc.headcountGrowthPct)}, Frame is also well-positioned to help the team scale throughput without proportional headcount additions.`;
+      }
+
+      text += ' All figures are estimates based on the assumptions entered and are intended as a starting point for discussion, not a guarantee of outcomes.';
+      return text;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  STEP 4, PROPOSAL / EXECUTIVE SUMMARY
+    // ═══════════════════════════════════════════════════════════════════
+    function Step4({ s, u, calc }) {
+      const narrative = generateNarrative(s, calc);
+      const [copied, setCopied] = useState(false);
+
+      function buildTextExport() {
+        const lines = [
+          `FRAME.IO ROI & PROPOSAL SUMMARY`,
+          `Generated: ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`,
+          ``,
+          `━━━ CUSTOMER ━━━`,
+          `Company: ${s.customerName || '-'}`,
+          `Opportunity: ${s.opportunityName || '-'}`,
+          ``,
+          `━━━ RECOMMENDED CONFIGURATION ━━━`,
+          `Plan: ${calc.plan?.name || '-'}`,
+          `Buying Program: ${calc.program?.fullName || '-'}`,
+          `Seats: ${fmt.num(calc.seats)}`,
+          `Included Managed Storage: ${fmt.tb(calc.includedManagedTB)}`,
+          `Included Mounted Storage: ${fmt.tb(calc.includedMountedTB)}`,
+          `Price Level: ${s.priceLevel}`,
+          `Estimated Annual Investment: ${fmt.currency(calc.totalSoftwareCost)}`,
+          ``,
+          `━━━ BUSINESS CASE ━━━`,
+          `Participating Users: ${fmt.num(calc.participants)}`,
+          `Avg. Fully Loaded Hourly Cost: ${fmt.currency(calc.hourlyRate)}`,
+          `Est. Minutes Saved / Person / Week (${s.activeScenario}): ${fmt.num(calc.adjMinutesSaved, 0)}`,
+          ``,
+          `Productive Capacity Recovered: ${fmt.currency(calc.productiveCapacityValue)}`,
+          `  (Value of time returned to higher-value work; not cash savings)`,
+          `Hard-Dollar Savings: ${fmt.currency(calc.hardDollarSavings)}`,
+          `Total Quantified Annual Value: ${fmt.currency(calc.totalQuantifiedValue)}`,
+          `Annual Frame Investment: ${fmt.currency(calc.totalInvestment)}`,
+          `Net Annual Value: ${fmt.currency(calc.netAnnualValue)}`,
+          `Estimated ROI: ${fmt.pct(calc.roi, 0)}`,
+          `Estimated Payback: ${fmt.months(calc.paybackMonths)}`,
+          ``,
+          `BREAK-EVEN THRESHOLD:`,
+          calc.hardDollarsCoverInvestment
+            ? `Hard-dollar savings (${fmt.currency(calc.hardDollarSavings)}) fully cover the Frame investment.`
+            : `Frame needs to save only ${fmt.num(calc.breakEvenMinutes, 0)} minutes / person / week to pay for itself.`,
+          ``,
+        ];
+
+        if (calc.capacityGapPct != null) {
+          lines.push(`━━━ CAPACITY GAP ━━━`);
+          lines.push(`Content Demand Growth: +${fmt.pct(calc.contentGrowthPct)}`);
+          lines.push(`Headcount Growth: +${fmt.pct(calc.headcountGrowthPct)}`);
+          lines.push(`Capacity Gap: ${fmt.num(calc.capacityGapPct)} percentage points`);
+          lines.push(``);
+        }
+
+        lines.push(`━━━ EXECUTIVE SUMMARY ━━━`);
+        lines.push(narrative);
+        lines.push(``);
+        lines.push(`━━━ ASSUMPTIONS ━━━`);
+        lines.push(`All values based on inputs entered. Conservative scenario = 50% of productivity estimate.`);
+        lines.push(`Expected = as entered. High-Impact = 150%. Hard-dollar savings unchanged across scenarios.`);
+        lines.push(`Productive capacity value ≠ cash savings. Represents employee time potentially returned to higher-value work.`);
+
+        return lines.join('\n');
+      }
+
+      function handleCopy() {
+        navigator.clipboard.writeText(buildTextExport()).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        });
+      }
+
+      if (!calc.plan) {
+        return (
+          <Card>
+            <div className="text-center py-10 text-gray-400">
+              Complete Steps 1–3 to generate your proposal.
+            </div>
+          </Card>
+        );
+      }
+
+      return (
+        <div className="space-y-5">
+          {/* Controls */}
+          <div className="flex flex-wrap items-center justify-between gap-3 no-print">
+            <div>
+              <p className="text-sm font-medium text-gray-700 mb-1">Scenario</p>
+              <ScenarioSelector value={s.activeScenario} onChange={v => u('activeScenario', v)} />
+            </div>
+            <div className="flex gap-2">
+              <button onClick={handleCopy}
+                className="flex items-center gap-2 px-4 py-2 bg-gray-900 text-white text-sm font-medium rounded-lg hover:bg-gray-700 transition-colors">
+                {copied ? '✓ Copied!' : '📋 Copy Proposal'}
+              </button>
+              <button onClick={() => window.print()}
+                className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors">
+                🖨 Print / PDF
+              </button>
+            </div>
+          </div>
+
+          {/* Print header (only visible when printing) */}
+          <div className="print-only mb-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-8 h-8 bg-[#FA0F00] rounded flex items-center justify-center">
+                <svg viewBox="0 0 20 20" fill="white" width="18" height="18">
+                  <rect x="2" y="2" width="7" height="7" rx="1"/>
+                  <rect x="11" y="2" width="7" height="7" rx="1"/>
+                  <rect x="2" y="11" width="7" height="7" rx="1"/>
+                  <rect x="11" y="11" width="7" height="7" rx="1"/>
+                </svg>
+              </div>
+              <div>
+                <p className="font-bold text-gray-900 text-lg">Frame.io ROI &amp; Proposal</p>
+                <p className="text-sm text-gray-500">{s.customerName} {s.opportunityName ? `· ${s.opportunityName}` : ''} · {new Date().toLocaleDateString()}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 1: Configuration */}
+          <Card>
+            <h2 className="text-lg font-bold text-gray-900 mb-4">Recommended Configuration</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-wide font-medium mb-3">Plan &amp; Licensing</p>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Plan</span>
+                    <span className="font-semibold">{calc.plan.name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Buying Program</span>
+                    <span className="font-semibold">{calc.program?.name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Seats</span>
+                    <span className="font-semibold">{fmt.num(calc.seats)}</span>
+                  </div>
+                  {calc.pricePerSeat && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Price / Seat ({s.priceLevel})</span>
+                      <span className="font-semibold">{fmt.currency(calc.pricePerSeat)}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-wide font-medium mb-3">Storage</p>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Included Managed</span>
+                    <span className="font-semibold">{fmt.tb(calc.includedManagedTB)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Mounted Storage</span>
+                    <span className="font-semibold">{fmt.tb(calc.includedMountedTB)}</span>
+                  </div>
+                  {calc.projectedMediaTB > 0 && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Projected media need</span>
+                      <span className={`font-semibold ${calc.storageGapTB > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
+                        {fmt.tb(calc.projectedMediaTB)} {calc.storageGapTB > 0 ? '⚠' : '✓'}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 pt-4 border-t">
+              <div className="flex items-center justify-between">
+                <span className="text-base font-semibold text-gray-900">Estimated Annual Investment</span>
+                <span className="text-2xl font-bold text-gray-900">{fmt.currency(calc.totalSoftwareCost)}</span>
+              </div>
+              {calc.storageGapTB > 0 && (
+                <p className="text-xs text-amber-600 mt-1">
+                  ⚠ Projected media volume exceeds included storage by {fmt.tb(calc.storageGapTB)}.
+                  Adding {fmt.tb(calc.recommendedAddTB)} managed storage would add ~{fmt.currency(calc.recommendedAddStorageCost)}/year.
+                </p>
+              )}
+            </div>
+          </Card>
+
+          {/* Section 2: Business Case */}
+          <Card>
+            <h2 className="text-lg font-bold text-gray-900 mb-4">Business Case</h2>
+
+            {/* Break-even hero */}
+            {calc.breakEvenMinutes != null && (
+              <div className="bg-[#1c1c1c] text-white rounded-xl p-6 mb-4">
+                <p className="text-sm font-medium opacity-80 mb-1">Break-Even Threshold</p>
+                <p className="text-4xl font-black mb-1">{fmt.num(calc.breakEvenMinutes, 0)} min</p>
+                <p className="text-base font-semibold opacity-90">per person, per week</p>
+                <p className="text-sm opacity-75 mt-3 max-w-xl">
+                  Frame.io only needs to save {s.customerName || 'this team'} {fmt.num(calc.breakEvenMinutes, 0)} minutes
+                  per participant per week to pay for itself{calc.hardDollarSavings > 0
+                    ? ` (after ${fmt.currency(calc.hardDollarSavings)} in hard-dollar savings)` : ''}.
+                </p>
+              </div>
+            )}
+
+            {calc.hardDollarsCoverInvestment && (
+              <div className="bg-emerald-600 text-white rounded-xl p-6 mb-4">
+                <p className="text-sm font-medium opacity-80 mb-1">Break-Even Status</p>
+                <p className="text-xl font-bold">Hard-dollar savings fully cover the investment.</p>
+                <p className="text-sm opacity-80 mt-1">
+                  {fmt.currency(calc.hardDollarSavings)}/year in identified savings exceeds the {fmt.currency(calc.totalInvestment)} annual investment.
+                  Every minute of productivity gained is entirely additional value.
+                </p>
+              </div>
+            )}
+
+            {/* Metric cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
+              <MetricCard label="Annual Frame Investment" value={fmt.currency(calc.totalInvestment, true)} color="blue"
+                tip="Total estimated annual software cost based on selected plan, seats, and add-ons." />
+              <MetricCard label="Productive Capacity Recovered" value={fmt.currency(calc.productiveCapacityValue, true)}
+                sub="Not cash savings" color="purple"
+                tip="Value of employee time potentially returned to higher-value work. This is capacity, not guaranteed savings." />
+              {calc.hardDollarSavings > 0 && (
+                <MetricCard label="Hard-Dollar Savings" value={fmt.currency(calc.hardDollarSavings, true)}
+                  sub="Actual spend reduction" color="green"
+                  tip="Entered spend that may be eliminated or reduced: storage, tools, infrastructure." />
+              )}
+              <MetricCard label="Total Quantified Value" value={fmt.currency(calc.totalQuantifiedValue, true)}
+                color="green" tip="Productive capacity value + hard-dollar savings." />
+              {calc.roi != null && (
+                <MetricCard label={`Est. ROI (${s.activeScenario})`} value={fmt.pct(calc.roi, 0)}
+                  color={calc.roi >= 0 ? 'green' : 'red'}
+                  tip="(Total quantified value − Frame investment) ÷ Frame investment × 100" />
+              )}
+              {calc.paybackMonths != null && (
+                <MetricCard label="Est. Payback" value={fmt.months(calc.paybackMonths)} color="blue"
+                  tip="Frame investment ÷ total quantified annual value × 12." />
+              )}
+            </div>
+
+            {/* Capacity/hard-dollar separation note */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+              <div className="bg-purple-50 border border-purple-100 rounded-lg p-3 text-sm">
+                <p className="font-semibold text-purple-900 mb-1">Capacity Impact</p>
+                <p className="text-purple-800">{fmt.currency(calc.productiveCapacityValue)}/year</p>
+                <p className="text-xs text-purple-600 mt-1">
+                  Value of employee time potentially returned to higher-value work.
+                  This is not a guarantee of cash savings or headcount reduction.
+                </p>
+              </div>
+              {calc.hardDollarSavings > 0 ? (
+                <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-3 text-sm">
+                  <p className="font-semibold text-emerald-900 mb-1">Hard-Dollar Impact</p>
+                  <p className="text-emerald-800">{fmt.currency(calc.hardDollarSavings)}/year</p>
+                  <p className="text-xs text-emerald-600 mt-1">
+                    Actual spend that may be eliminated or reduced. Entered by the seller based on customer inputs.
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-gray-50 border border-gray-100 rounded-lg p-3 text-sm">
+                  <p className="font-semibold text-gray-700 mb-1">Hard-Dollar Impact</p>
+                  <p className="text-gray-500">Not quantified</p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    Enter current storage, tool, or infrastructure spend in Step 3 to surface hard-dollar savings.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Scenario comparison */}
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Scenario Comparison</p>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { id: 'conservative', label: 'Conservative', mult: 0.5 },
+                  { id: 'expected',     label: 'Expected',     mult: 1.0 },
+                  { id: 'high-impact',  label: 'High-Impact',  mult: 1.5 },
+                ].map(sc => {
+                  const adjMins = (parseFloat(s.minutesSavedPerWeek) || 0) * sc.mult;
+                  const capVal = calc.participants > 0 && calc.hourlyRate > 0
+                    ? calc.participants * (adjMins / 60) * calc.hourlyRate * PC.rules.workingWeeksPerYear : 0;
+                  const totalVal = capVal + calc.hardDollarSavings;
+                  const scRoi = calc.totalInvestment > 0 ? ((totalVal - calc.totalInvestment) / calc.totalInvestment) * 100 : null;
+                  const beMin = (!calc.hardDollarsCoverInvestment && calc.participants > 0 && calc.hourlyRate > 0)
+                    ? (calc.remainingToJustify / calc.participants / calc.hourlyRate / PC.rules.workingWeeksPerYear) * 60 / sc.mult : null;
+                  return (
+                    <div key={sc.id}
+                      className={`rounded-lg p-3 border text-xs ${s.activeScenario === sc.id ? 'border-[#FA0F00] bg-red-50' : 'border-gray-200 bg-gray-50'}`}>
+                      <p className="font-semibold text-gray-700 mb-2">{sc.label}</p>
+                      <p className="text-gray-600">Capacity: <span className="font-medium">{fmt.currency(capVal, true)}</span></p>
+                      <p className="text-gray-600">Total: <span className="font-medium">{fmt.currency(totalVal, true)}</span></p>
+                      <p className="text-gray-600">ROI: <span className={`font-medium ${scRoi != null && scRoi >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{fmt.pct(scRoi, 0)}</span></p>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-gray-400 mt-2">
+                Hard-dollar savings ({fmt.currency(calc.hardDollarSavings)}) are unchanged across scenarios.
+                Only the productivity estimate scales.
+              </p>
+            </div>
+
+            {/* Capacity gap */}
+            {calc.capacityGapPct != null && calc.capacityGapPct > 0 && (
+              <div className="mt-4 bg-amber-50 border border-amber-100 rounded-lg p-4">
+                <p className="text-sm font-semibold text-amber-900 mb-1">Capacity Gap</p>
+                <p className="text-2xl font-bold text-amber-800 mb-1">+{fmt.num(calc.capacityGapPct)} pp</p>
+                <p className="text-sm text-amber-800">
+                  Content demand is expected to grow <strong>{fmt.pct(calc.contentGrowthPct)}</strong> while
+                  creative headcount grows only <strong>{fmt.pct(calc.headcountGrowthPct)}</strong>.
+                  The organization will need significantly more throughput from its existing team.
+                  Frame can help reduce coordination overhead and accelerate delivery cycles,
+                  though it is not a substitute for headcount.
+                </p>
+              </div>
+            )}
+          </Card>
+
+          {/* Section 3: Executive Narrative */}
+          <Card>
+            <h2 className="text-lg font-bold text-gray-900 mb-3">Executive Narrative</h2>
+            <p className="text-xs text-gray-500 mb-3 no-print">
+              Paste this into an email, proposal document, or executive readout. Adjust as needed.
+            </p>
+            <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-800 leading-relaxed border border-gray-200">
+              {narrative || <span className="text-gray-400">Complete Steps 1–3 to generate the narrative.</span>}
+            </div>
+          </Card>
+
+          {/* Disclaimer */}
+          <div className="text-xs text-gray-400 leading-relaxed">
+            <strong>Important:</strong> All figures are estimates based on inputs provided and are intended as a starting point for discussion.
+            Productive capacity recovered represents the value of time potentially returned to higher-value work and is not a guarantee of cash savings or headcount reduction.
+            Hard-dollar savings reflect only spend explicitly identified by the seller. ROI and payback estimates are based on the assumptions entered.
+            Actual outcomes depend on adoption, workflow change, and business context.
+            Prices shown at {s.priceLevel} pricing; final pricing subject to Deal Desk review.
+          </div>
+
+          {/* Assumptions panel */}
+          <AssumptionsPanel s={s} u={u} calc={calc} />
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  NAVIGATION BUTTONS
+    // ═══════════════════════════════════════════════════════════════════
+    function NavButtons({ step, setStep, calc }) {
+      const canNext = () => {
+        if (step === 0) return calc.plan && calc.seats >= 10 && calc.errors.length === 0;
+        if (step === 1) return true;
+        if (step === 2) return calc.participants > 0 && calc.hourlyRate > 0 && calc.adjMinutesSaved > 0;
+        return false;
+      };
+      const labels = ['Continue to Storage →', 'Continue to ROI →', 'Generate Proposal →', ''];
+      return (
+        <div className="flex justify-between mt-6 pt-4 border-t border-gray-200 no-print">
+          <button
+            onClick={() => setStep(s => Math.max(0, s - 1))}
+            className={`px-5 py-2.5 text-sm font-medium rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors ${step === 0 ? 'invisible' : ''}`}
+          >
+            ← Back
+          </button>
+          {step < 3 && (
+            <button
+              onClick={() => setStep(s => s + 1)}
+              disabled={!canNext()}
+              className={`px-6 py-2.5 text-sm font-medium rounded-lg transition-colors
+                ${canNext()
+                  ? 'bg-[#FA0F00] text-white hover:bg-[#d90d00] shadow-sm'
+                  : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}
+            >
+              {labels[step]}
+            </button>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  APP ROOT
+    // ═══════════════════════════════════════════════════════════════════
+    function App() {
+      const [step, setStep] = useState(0);
+      const [s, setState] = useState({
+        customerName: '',
+        opportunityName: '',
+        buyingProgram: '',
+        plan: '',
+        seats: '',
+        priceLevel: 'target',
+        // Add-ons
+        additionalManagedTB: '0',
+        additionalMountedBlocks: '1',
+        // Step 2
+        activeMediaTB: '',
+        annualGrowthPct: '',
+        currentStorageSpend: '',
+        duplicationFactor: '',
+        // Step 3 (participants derives from seats × 2 when blank)
+        participants: '',
+        hourlyLaborCost: '75',
+        minutesSavedPerWeek: '30',
+        currentSpendToReduce: '',
+        annualProjects: '',
+        reviewRoundsPerProject: '',
+        hoursDelayPerReview: '',
+        contentDemandGrowthPct: '',
+        headcountGrowthPct: '',
+        // Custom price overrides (leave blank to use table price)
+        customPricePerSeat: '',
+        customManagedPrice: '',
+        customMountedPrice: '',
+        // Global
+        activeScenario: 'expected',
+      });
+
+      const u = useCallback((key, value) => {
+        setState(prev => ({ ...prev, [key]: value }));
+      }, []);
+
+      const calc = useMemo(() => calculate(s), [s]);
+
+      // Persist to sessionStorage
+      useEffect(() => {
+        try {
+          const saved = sessionStorage.getItem('frame-roi-state');
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            setState(prev => ({ ...prev, ...parsed }));
+          }
+        } catch {}
+      }, []);
+
+      useEffect(() => {
+        try {
+          sessionStorage.setItem('frame-roi-state', JSON.stringify(s));
+        } catch {}
+      }, [s]);
+
+      const stepProps = { s, u, calc };
+
+      return (
+        <div className="min-h-screen bg-[#f5f5f5]">
+          <Header />
+          <StepProgress current={step} onGo={newStep => { if (newStep <= step) setStep(newStep); }} />
+
+          <div className="max-w-screen-xl mx-auto px-4 py-6 print-page">
+            {/* Layout: form (left) + results sidebar (right) */}
+            <div className={`${step < 3 ? 'lg:grid lg:grid-cols-5 lg:gap-6' : ''}`}>
+              {/* Main form area */}
+              <div className={step < 3 ? 'lg:col-span-3' : ''}>
+                {step === 0 && <Step1 {...stepProps} />}
+                {step === 1 && <Step2 {...stepProps} />}
+                {step === 2 && <Step3 {...stepProps} />}
+                {step === 3 && <Step4 {...stepProps} />}
+                <NavButtons step={step} setStep={setStep} calc={calc} />
+              </div>
+
+              {/* Sticky results sidebar (steps 0–2 only) */}
+              {step < 3 && (
+                <div className="lg:col-span-2 mt-6 lg:mt-0">
+                  <div className="sticky top-6">
+                    <ResultsPanel {...stepProps} currentStep={step} />
+                    {step > 0 && <AssumptionsPanel {...stepProps} />}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
